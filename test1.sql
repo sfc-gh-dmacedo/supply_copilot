@@ -1,1 +1,0 @@
-use warehouse compute_wh;

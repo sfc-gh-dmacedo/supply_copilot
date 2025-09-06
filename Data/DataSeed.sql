@@ -88,7 +88,7 @@ join (
 
 -- Snapshot diário simples por loja/SKU
 insert into SUPPLY_BRONZE.FACT_INVENTORY_RAW
-select d.d, s.store_id, k.sku_id,
+select d.d as as_of_date, s.store_id, k.sku_id,
        greatest(0, round(50 + uniform(0,150,random()) - mod(abs(hash(k.sku_id)),20),0)) as on_hand,
        greatest(0, round(uniform(0,50,random()),0)) as on_order
 from SUPPLY_SILVER.DIM_DATE d
@@ -97,16 +97,15 @@ cross join SUPPLY_SILVER.DIM_SKU   k
 where d.d >= dateadd('day', -$days_hist, current_date());
 
 
--- Expande promoções em dias para facilitar o join de “promo ativa”
--- 6.1) Expande promoções por dia (usando DIM_DATE para evitar sequence/flatten)
+
+-- 6.6) Inserir no RAW
+insert into SUPPLY_BRONZE.FACT_SALES_RAW (txn_ts, store_id, sku_id, qty, revenue)
 with promo_days as (
   select p.store_id, p.sku_id, dd.d, p.lift_factor
   from SUPPLY_BRONZE.FACT_PROMO_RAW p
   join SUPPLY_SILVER.DIM_DATE dd
     on dd.d between p.start_date and p.end_date
 ),
-
--- 6.2) Gera grade de (dia, loja, sku) com probabilidade ~70% de ter venda
 base_grid as (
   select dd.d, s.store_id, k.sku_id
   from SUPPLY_SILVER.DIM_DATE dd
@@ -115,15 +114,12 @@ base_grid as (
   where dd.d >= dateadd('day', -$days_hist, current_date())
     and uniform(0,100,random()) < 70
 ),
-
--- 6.3) Demanda diária sintética com sazonalidade por DOW e lift de promoção
 daily_qty as (
   select g.d,
          g.store_id,
          g.sku_id,
          case dayofweekiso(g.d) when 6 then 1.1 when 7 then 1.2 else 1.0 end as dow_boost,
          coalesce(p.lift_factor, 1.0) as lift,
-         -- base: 5 + hash da combinação, com ruído leve, tudo >= 0 e inteiro
          greatest(
            0,
            floor( (5 + mod(abs(hash(g.sku_id||g.store_id)),10)) * 
@@ -136,8 +132,6 @@ daily_qty as (
   left join promo_days p
     on p.d=g.d and p.store_id=g.store_id and p.sku_id=g.sku_id
 ),
-
--- 6.4) Enriquecer com preço e calcular receita (sem subquery correlacionada)
 priced as (
   select q.d,
          q.store_id,
@@ -150,14 +144,12 @@ priced as (
     on sk.sku_id = q.sku_id
   where q.qty > 0
 ),
-
--- 6.5) Gerar um timestamp aleatório dentro do dia (cast explícito p/ inteiro)
 expanded as (
   select
     timestampadd(
       second,
       cast(uniform(0, 86399, random()) as int),
-      to_timestamp_ntz(d)               -- converte DATE -> TIMESTAMP_NTZ (00:00:00)
+      to_timestamp_ntz(d)
     ) as txn_ts,
     store_id,
     sku_id,
@@ -165,9 +157,6 @@ expanded as (
     revenue
   from priced
 )
-
--- 6.6) Inserir no RAW
-insert into SUPPLY_BRONZE.FACT_SALES_RAW (txn_ts, store_id, sku_id, qty, revenue)
 select txn_ts, store_id, sku_id, qty, revenue
 from expanded;
 
